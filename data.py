@@ -18,6 +18,13 @@ def pack_var_sequences(packed_sequences, padding_value = 0., total_length = None
     padded_sequences, _ = rnn_utils.pad_packed_sequence(packed_sequences, batch_first=True, padding_value=padding_value, total_length=total_length)
     return padded_sequences
 
+def sequence_mask(lengths, max_length = None, device = "cpu"): # mask 1 for padding, 0 for non-padding
+    lengths = torch.tensor(lengths, dtype=torch.int64)
+    if max_length is None:
+        max_length = lengths.max()
+    mask = torch.arange(max_length).expand(len(lengths), max_length) >= lengths.unsqueeze(1) # length is on cpu
+    return mask.to(device)
+
 def sequence_collate_fn(batch: List[Tuple[torch.Tensor, torch.Tensor]], max_length: int = 100, device = "cpu"):
     sorted_batch = sorted(batch, key=lambda x: len(x[0]), reverse=True)
     # padding src tensor
@@ -43,6 +50,10 @@ class SequenceDataset(Dataset):
         return len(self.en_sequences)
 
     def __getitem__(self, idx):
+        if len(self.en_sequences[idx]) > 100:
+            self.en_sequences[idx] = self.en_sequences[idx][:100]
+        if len(self.zh_sequences[idx]) > 100:
+            self.zh_sequences[idx] = self.zh_sequences[idx][:100]
         return torch.tensor(self.en_sequences[idx], dtype=torch.int64), torch.tensor(self.zh_sequences[idx], dtype=torch.int64)
 
     def process(self, block_ids = 1):

@@ -3,22 +3,22 @@ import pickle as pkl
 
 from tqdm import tqdm
 
-tkn = btkn.load_bert_tokenizer('bert_tokenizer_zh.json')
-tkn.no_padding()
+# tkn = btkn.load_bert_tokenizer('bert_tokenizer_zh.json')
+# tkn.no_padding()
 
-with open('sentences_zh.pkl', 'rb') as f:
-    sentences_zh = pkl.load(f)
+# with open('sentences_zh.pkl', 'rb') as f:
+#     sentences_zh = pkl.load(f)
 
-def calc_encode_length(tokenizer = None, tokenizer_path = "bert_tokenizer_{}.json", sentences = "sentences_{}.pkl", lang = "zh"):
-    if not tokenizer:
-        tokenizer = btkn.load_bert_tokenizer(tokenizer_path.format(lang))
-    with open(sentences.format(lang), 'rb') as f:
-        sentences = pkl.load(f)
-    encode_length = []
-    for se in tqdm(sentences):
-        en = tkn.encode(se)
-        encode_length.append(len(en.ids))
-    return encode_length
+# def calc_encode_length(tokenizer = None, tokenizer_path = "bert_tokenizer_{}.json", sentences = "sentences_{}.pkl", lang = "zh"):
+#     if not tokenizer:
+#         tokenizer = btkn.load_bert_tokenizer(tokenizer_path.format(lang))
+#     with open(sentences.format(lang), 'rb') as f:
+#         sentences = pkl.load(f)
+#     encode_length = []
+#     for se in tqdm(sentences):
+#         en = tkn.encode(se)
+#         encode_length.append(len(en.ids))
+#     return encode_length
 
 
 r"""
@@ -64,3 +64,19 @@ this is a code to plot the token length distribution of the sentences in the dat
 # # plt.hist(enc_ratio, bins=100, range=(0, 10), alpha=0.5, label='zh/en')
 # plt.legend(loc='upper right')
 # plt.show()
+
+from models import AttnLayer
+
+import torch
+
+torch.manual_seed(0)
+
+idx = [torch.randint(0, 1000, ()) for _ in range(100)]
+idx = torch.tensor(idx)
+
+import time
+start = time.time()
+for i in range(1000):
+    idx.max()
+end = time.time()
+print(end - start)
