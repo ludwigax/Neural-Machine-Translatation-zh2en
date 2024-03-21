@@ -1,4 +1,4 @@
-from models import SeqLSTM, LSTMEncoder, LSTMDecoder
+from models import SeqLSTMv2, LSTMEncoder, LSTMDecoder
 from data import SequenceDataset, sequence_collate_fn
 
 import torch
@@ -14,11 +14,13 @@ def train(model: nn.Module, dataloader: DataLoader, optimizer, criterion, clip):
     model.train()
     epoch_loss = 0
 
-    for i, (src, trg, lens) in enumerate(dataloader):
+    for i, (src_block, trg_block) in enumerate(dataloader):
         # the src and trg are already on the device
         optimizer.zero_grad()
+        src, src_len = src_block
+        trg, trg_len = trg_block
 
-        output = model(src, trg, lens)
+        output = model(src, src_len, trg, trg_len)
         norm = torch.norm(output, p=2).detach()
 
         B = output.shape[1]
@@ -54,7 +56,7 @@ if __name__=="__main__":
 
     wandb.init(project="seq2seq", name="lstm_test_version_1")
 
-    seq2seq = SeqLSTM(vocab_size, input_dim, hidden_dim, bidirectional, num_layers, device).to(device)
+    seq2seq = SeqLSTMv2(vocab_size, input_dim, hidden_dim, bidirectional, num_layers, device=device).to(device)
 
     optimizer = optim.Adam(seq2seq.parameters(), lr=1e-2)
     criterion = nn.CrossEntropyLoss(ignore_index=pad_idx)
