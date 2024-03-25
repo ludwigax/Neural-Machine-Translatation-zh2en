@@ -24,7 +24,7 @@ def train(model: nn.Module, dataloader: DataLoader, optimizer, criterion, clip):
         src, src_len = src_block
         trg, trg_len = trg_block
 
-        output = model(src, src_len, trg, trg_len)
+        output = model(src, src_len, trg, trg_len, teacher_forcing_ratio=0.5)
         norm = torch.norm(output, p=2).detach()
 
         B = output.shape[1]
@@ -58,7 +58,7 @@ if __name__=="__main__":
     device = "cuda" if torch.cuda.is_available() else "cpu"
     pad_idx = 0
 
-    wandb.init(project="seq2seq", name="lstm_test_version_1")
+    # wandb.init(project="seq2seq", name="lstm_test_version_1")
 
     seq2seq = SeqAttnLSTM(vocab_size, input_dim, hidden_dim, bidirectional, num_layers, device=device).to(device)
 
@@ -82,7 +82,7 @@ if __name__=="__main__":
     for e in range(epochs):
         
         train_loss = train(seq2seq, train_loader, optimizer, criterion, clip)
-        wandb.log({"epoch": e, "train_loss": train_loss})
+        # wandb.log({"epoch": e, "train_loss": train_loss})
         print(f'Epoch: {e+1:02} | Train Loss: {train_loss:.3f}')
 
         if (e + 1) % 5 == 0:
@@ -92,4 +92,4 @@ if __name__=="__main__":
             dataset.process(block_ids + 1)
             train_loader = DataLoader(Subset(dataset, trn_idx), batch_size=100, shuffle=True, collate_fn=collate_fn)
 
-    wandb.finish()
+    # wandb.finish()

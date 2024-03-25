@@ -6,6 +6,12 @@ from tokenizers import Tokenizer
 
 from data import pad_var_sequences, pack_var_sequences, sequence_mask
 
+
+def is_overridden(base_class, derived_class, method_name):
+    base_method = getattr(base_class, method_name)
+    derived_method = getattr(derived_class, method_name)
+    return base_method.__code__ != derived_method.__code__
+
 class SmallBertModel(nn.Module):
     def __init__(
         self,
@@ -78,7 +84,6 @@ class AttnLayer(nn.Module):
         """
         return attn_out, attn
 
-
 class LSTMEncoder(nn.Module):
     def __init__(self, input_dim, hidden_dim, num_layers=1, bidirectional=True):
         super(LSTMEncoder, self).__init__()
@@ -117,9 +122,98 @@ class LSTMCellDecoder(nn.Module):
         hidden, cell = self.lstm(input, (hidden, cell))
         prediction = self.fc(hidden)
         return prediction, hidden, cell
+    
+class EncDecModule(nn.Module):
+    def __init__(self, **args):
+        super(EncDecModule, self).__init__(**args)
 
+    def _attn(self, enc_out, dec_out, enc_mask=None):
+        raise NotImplementedError
+    
+    def _batch(self):
+        raise NotImplementedError
+    
+    def _step(self):
+        raise NotImplementedError
+    
+    def _proj(self, hidden, cell):
+        raise NotImplementedError
 
-class SeqLSTMv1(nn.Module):
+    def encode(self, src, src_len, trg=None, trg_len=None):
+        raise NotImplementedError
+    
+    def decode(self, trg):
+        raise NotImplementedError
+    
+    def forward(self, src, src_len, trg, trg_len, teacher_forcing_ratio=0.5):
+        batch_size = trg.shape[0]
+        trg_len_size = trg.shape[1]
+        trg_vocab_size = self.vocab_size
+
+        logits = torch.zeros(batch_size, trg_len_size, trg_vocab_size).to(self.device)
+        enc_out, enc_mask, hidden, cell = self.encode(src=src, src_len=src_len, trg=trg, trg_len=trg_len)
+
+        # all projection operation
+        if is_overridden(EncDecModule, self, "_proj"):
+            hidden, cell = self._proj(hidden, cell)
+        input = trg[:, 0]
+
+        # decode step
+        random_teacher_forcing = torch.rand(trg_len_size - 1, device=self.device) < teacher_forcing_ratio
+        for t in range(1, trg_len_size):
+            pred, hidden, cell = self.decode(input, hidden, cell)
+            if is_overridden(EncDecModule, self, "_attn"):
+                pred, _, _ = self._attn(enc_out, pred, enc_mask)
+            if hasattr(self, "o_head"):
+                pred = self.o_head(pred)
+            prob = self.softmax(pred)
+            logits[:, t, :] = pred
+            top1 = prob.argmax(1)
+            input = trg[:, t] if random_teacher_forcing[t-1] else top1
+        return logits
+    
+    def predict(self, src, src_len, max_len=100): # i do not think batch in predict is good idea
+        batch_size = src.shape[0]
+        logits = torch.zeros(batch_size, max_len, self.vocab_size).to(self.device)
+        enc_out, enc_mask, hidden, cell = self.encode(src=src, src_len=src_len)
+
+        if is_overridden(EncDecModule, self, "_proj"):
+            hidden, cell = self._proj(hidden, cell)
+
+        input = torch.ones(batch_size, dtype=torch.int64).to(self.device) * 2 # <cls> token
+        preds = []
+        for t in range(1, max_len):
+            pred, hidden, cell = self.decode(input, hidden, cell)
+            if is_overridden(EncDecModule, self, "_attn"):
+                pred, _, _ = self._attn(enc_out, pred, enc_mask)
+            if hasattr(self, "o_head"):
+                pred = self.o_head(pred)
+            prob = self.softmax(pred)
+            logits[:, t, :] = pred
+            top_5_prob, top_5_ids = torch.topk(prob, 5, dim=1, sorted=True)
+            top_5_prob = top_5_prob / top_5_prob.sum(1, keepdim=True)
+            pred_ids = []
+            for i in range(batch_size):
+                top_cum = torch.cumsum(top_5_prob[i], dim=0)
+                rand_thr = torch.rand(1).item()
+                idx = (top_cum > rand_thr).nonzero()[0].item()
+                pred_ids.append(idx)
+            if batch_size == 1:
+                preds.append(pred_ids[0])
+            else:
+                preds.append(pred_ids)
+        if not batch_size == 1:
+            batch_preds, temp_stc = [], []
+            for i in range(batch_size):
+                for j in range(max_len):
+                    if preds[j][i] == 3:
+                        break
+                    temp_stc.append(preds[j][i])
+                batch_preds.append(temp_stc)
+            pred = batch_preds
+        return logits, pred
+
+class SeqLSTMv1(EncDecModule):
     def __init__(self, vocab_size, input_size, hidden_size, bidirectional_encoder=True, num_layers=1, act=False, device="cuda"):
         super(SeqLSTMv1, self).__init__()
         self.in_emb = nn.Embedding(vocab_size, input_size)
@@ -137,48 +231,27 @@ class SeqLSTMv1(nn.Module):
             self.c_t = nn.Linear(t_hidden_size, hidden_size, bias=False)
         self.vocab_size = vocab_size
         self.device = device
-    
-    def forward(self, src, src_len, trg, trg_len, teacher_forcing_ratio=0.5):
-        batch_size = trg.shape[0] # src with shape (B, L)
-        trg_len_size = trg.shape[1]
-        trg_vocab_size = self.vocab_size
 
-        outputs = torch.zeros(batch_size, trg_len_size, trg_vocab_size).to(self.device)
-
-        src = self.in_emb(src)
-        padded_src = pad_var_sequences(src, src_len)
-        _, hidden, cell = self.encoder(padded_src)
-
+    def _proj(self, hidden, cell):
         if self.encoder.bidirectional:
             hidden = hidden.view(self.encoder.num_layers, -1, self.encoder.hidden_dim * 2)
             cell = cell.view(self.encoder.num_layers, -1, self.encoder.hidden_dim * 2)
-
         hidden = self.h_t(hidden)
         cell = self.c_t(cell)
+        return hidden, cell
 
-        input = trg[:, 0]
+    def encode(self, src, src_len, **args):
+        src = self.in_emb(src)
+        padded_src = pad_var_sequences(src, src_len)
+        _, hidden, cell = self.encoder(padded_src)
+        return None, None, hidden, cell
+    
+    def decode(self, input, hidden, cell):
+        input = self.out_emb(input)
+        prediction, hidden, cell = self.decoder(input, hidden, cell)
+        return prediction, hidden, cell
 
-        if teacher_forcing_ratio == 1: # use teacher forcing
-            teaching_trg = trg[:, :-1]
-            padded_trg = pad_var_sequences(self.out_emb(teaching_trg), trg_len[:-1])
-            padded_pred, hidden, cell = self.decoder(padded_trg, hidden, cell)
-            pred = pack_var_sequences(padded_pred, total_length=trg_len_size)
-            outputs[:, 1:, :] = pred
-            return outputs
-
-        random_teacher_forcing = torch.rand(trg_len_size - 1, device=self.device) < teacher_forcing_ratio
-        for t in range(1, trg_len_size):
-            input = self.out_emb(input)
-            prediction, hidden, cell = self.decoder(input, hidden, cell)
-            prob = self.softmax(prediction)
-            outputs[:, t, :] = prediction
-            top1 = prob.argmax(1)
-            input = trg[:, t] if random_teacher_forcing[t-1] else top1
-
-        return outputs
-
-
-class SeqLSTMv2(nn.Module):
+class SeqLSTMv2(EncDecModule):
     def __init__(self, vocab_size, input_size, hidden_size, bidirectional_encoder=True, num_layers=1, device="cuda"):
         super(SeqLSTMv2, self).__init__()
         self.in_emb = nn.Embedding(vocab_size, input_size)
@@ -194,48 +267,25 @@ class SeqLSTMv2(nn.Module):
         self.vocab_size = vocab_size
         self.device = device
 
-    def forward(self, src, src_len, trg, trg_len, teacher_forcing_ratio=0.5):
-        batch_size = trg.shape[0]
-        trg_len_size = trg.shape[1]
-        trg_vocab_size = self.vocab_size
-
-        outputs = torch.zeros(batch_size, trg_len_size, trg_vocab_size).to(self.device)
-
-        src = self.in_emb(src)
-        padded_src = pad_var_sequences(src, src_len)
-        _, hidden, cell = self.encoder(padded_src)
-
+    def _proj(self, hidden, cell):
         if self.encoder.bidirectional:
             hidden = hidden.view(self.encoder.num_layers, -1, self.encoder.hidden_dim * 2)
             cell = cell.view(self.encoder.num_layers, -1, self.encoder.hidden_dim * 2)
-
         hidden = self.h_t(hidden[-1, :])
         cell = self.c_t(cell[-1, :])
 
-        input = trg[:, 0]
-
-        if teacher_forcing_ratio == 1: # use teacher forcing
-            teaching_trg = trg[:, :-1]
-            padded_trg = pad_var_sequences(self.out_emb(teaching_trg), trg_len[:-1])
-            padded_pred, hidden, cell = self.decoder(padded_trg, hidden, cell)
-            pred = pack_var_sequences(padded_pred, total_length=trg_len_size)
-            pred = self.o_head(pred)
-            outputs[:, 1:, :] = pred
-            return outputs
-
-        random_teacher_forcing = torch.rand(trg_len_size - 1, device=self.device) < teacher_forcing_ratio
-        for t in range(1, trg_len_size):
-            input = self.out_emb(input)
-            prediction, hidden, cell = self.decoder(input, hidden, cell)
-            prediction = self.o_head(prediction)
-            prob = self.softmax(prediction)
-            outputs[:, t, :] = prediction
-            top1 = prob.argmax(1)
-            input = trg[:, t] if random_teacher_forcing[t-1] else top1
-
-        return outputs
+    def encode(self, src, src_len, **args):
+        src = self.in_emb(src)
+        padded_src = pad_var_sequences(src, src_len)
+        _, hidden, cell = self.encoder(padded_src)
+        return None, None, hidden, cell
     
-class SeqAttnLSTM(nn.Module):
+    def decode(self, input, hidden, cell):
+        input = self.out_emb(input)
+        prediction, hidden, cell = self.decoder(input, hidden, cell)
+        return prediction, hidden, cell
+
+class SeqAttnLSTM(EncDecModule):
     def __init__(self, vocab_size, input_size, hidden_size, bidirectional_encoder=True, num_layers=1, device="cuda"):
         super(SeqAttnLSTM, self).__init__()
         self.in_emb = nn.Embedding(vocab_size, input_size)
@@ -253,50 +303,85 @@ class SeqAttnLSTM(nn.Module):
         self.vocab_size = vocab_size
         self.device = device
 
-    def forward(self, src, src_len, trg, trg_len, teacher_forcing_ratio=0.5):
-        batch_size = trg.shape[0]
+    def _proj(self, hidden, cell):
+        if self.encoder.bidirectional:
+            hidden = hidden.view(self.encoder.num_layers, -1, self.encoder.hidden_dim * 2)
+            cell = cell.view(self.encoder.num_layers, -1, self.encoder.hidden_dim * 2)
+        hidden = self.h_t(hidden[-1, :])
+        cell = self.c_t(cell[-1, :])
+        return hidden, cell
+    
+    def _attn(self, enc_out, dec_out, enc_mask=None):
+        attn_pred, attn = self.attn(enc_out, dec_out, enc_mask)
+        pred = torch.cat([dec_out, attn_pred.squeeze(1)], dim=1)
+        return pred, attn_pred.squeeze(1), attn
+
+    def encode(self, src, src_len, trg=None, **args):
         trg_len_size = trg.shape[1]
-        trg_vocab_size = self.vocab_size
-
-        outputs = torch.zeros(batch_size, trg_len_size, trg_vocab_size).to(self.device)
-
         src = self.in_emb(src)
         padded_src = pad_var_sequences(src, src_len)
         packed_src_out, hidden, cell = self.encoder(padded_src)
         src_out = pack_var_sequences(packed_src_out, padding_value=0., total_length=trg_len_size) # src_out (B, L, H * 2)
         src_out_t = self.enc_t(src_out) # src_out_t (B, L, H)
         src_mask = sequence_mask(src_len, max_length=trg_len_size, device=self.device) # src_mask (B, L)
+        return src_out_t, src_mask, hidden, cell
+    
+    def decode(self, input, hidden, cell):
+        input = self.out_emb(input)
+        prediction, hidden, cell = self.decoder(input, hidden, cell)
+        return prediction, hidden, cell
+    
+# class SeqAttnLSTM(nn.Module):
+#     def __init__(self, vocab_size, input_size, hidden_size, bidirectional_encoder=True, num_layers=1, device="cuda"):
+#         super(SeqAttnLSTM, self).__init__()
+#         self.in_emb = nn.Embedding(vocab_size, input_size)
+#         self.out_emb = nn.Embedding(vocab_size, hidden_size)
+#         self.encoder = LSTMEncoder(input_size, hidden_size, num_layers, bidirectional_encoder)
+#         self.decoder = LSTMCellDecoder(hidden_size, hidden_size)
+#         self.softmax = nn.LogSoftmax(dim=1)
+#         self.attn = AttnLayer()
+#         if bidirectional_encoder:
+#             t_hidden_size = 2 * hidden_size
+#         self.h_t = nn.Linear(t_hidden_size, hidden_size, bias=False)
+#         self.c_t = nn.Linear(t_hidden_size, hidden_size, bias=False)
+#         self.enc_t = nn.Linear(t_hidden_size, hidden_size, bias=False)
+#         self.o_head = nn.Linear(hidden_size * 2, vocab_size, bias=False)
+#         self.vocab_size = vocab_size
+#         self.device = device
 
-        if self.encoder.bidirectional:
-            hidden = hidden.view(self.encoder.num_layers, -1, self.encoder.hidden_dim * 2)
-            cell = cell.view(self.encoder.num_layers, -1, self.encoder.hidden_dim * 2)
+#     def forward(self, src, src_len, trg, trg_len, teacher_forcing_ratio=0.5):
+#         batch_size = trg.shape[0]
+#         trg_len_size = trg.shape[1]
+#         trg_vocab_size = self.vocab_size
 
-        hidden = self.h_t(hidden[-1, :])
-        cell = self.c_t(cell[-1, :])
+#         outputs = torch.zeros(batch_size, trg_len_size, trg_vocab_size).to(self.device)
 
-        input = trg[:, 0]
+#         src = self.in_emb(src)
+#         padded_src = pad_var_sequences(src, src_len)
+#         packed_src_out, hidden, cell = self.encoder(padded_src)
+#         src_out = pack_var_sequences(packed_src_out, padding_value=0., total_length=trg_len_size) # src_out (B, L, H * 2)
+#         src_out_t = self.enc_t(src_out) # src_out_t (B, L, H)
+#         src_mask = sequence_mask(src_len, max_length=trg_len_size, device=self.device) # src_mask (B, L)
 
-        if teacher_forcing_ratio == 1: # use teacher forcing
-            teaching_trg = trg[:, :-1]
-            padded_trg = pad_var_sequences(self.out_emb(teaching_trg), trg_len[:-1])
-            padded_pred, hidden, cell = self.decoder(padded_trg, hidden, cell)
-            pred = pack_var_sequences(padded_pred, total_length=trg_len_size)
-            attn_pred, attn = self.attn(src_out_t, pred, src_mask)
-            pred = torch.cat([pred, attn_pred], dim=2)
-            pred = self.o_head(pred)
-            outputs[:, 1:, :] = pred
-            return outputs
+#         if self.encoder.bidirectional:
+#             hidden = hidden.view(self.encoder.num_layers, -1, self.encoder.hidden_dim * 2)
+#             cell = cell.view(self.encoder.num_layers, -1, self.encoder.hidden_dim * 2)
+
+#         hidden = self.h_t(hidden[-1, :])
+#         cell = self.c_t(cell[-1, :])
+
+#         input = trg[:, 0]
         
-        random_teacher_forcing = torch.rand(trg_len_size - 1, device=self.device) < teacher_forcing_ratio
-        for t in range(1, trg_len_size):
-            input = self.out_emb(input)
-            prediction, hidden, cell = self.decoder(input, hidden, cell)
-            attn_pred, attn = self.attn(src_out_t, prediction, src_mask)
-            prediction = torch.cat([prediction, attn_pred.squeeze(1)], dim=1)
-            prediction = self.o_head(prediction)
-            prob = self.softmax(prediction)
-            outputs[:, t, :] = prediction
-            top1 = prob.argmax(1)
-            input = trg[:, t] if random_teacher_forcing[t-1] else top1
-        return outputs
+#         random_teacher_forcing = torch.rand(trg_len_size - 1, device=self.device) < teacher_forcing_ratio
+#         for t in range(1, trg_len_size):
+#             input = self.out_emb(input)
+#             prediction, hidden, cell = self.decoder(input, hidden, cell)
+#             attn_pred, attn = self.attn(src_out_t, prediction, src_mask)
+#             prediction = torch.cat([prediction, attn_pred.squeeze(1)], dim=1)
+#             prediction = self.o_head(prediction)
+#             prob = self.softmax(prediction)
+#             outputs[:, t, :] = prediction
+#             top1 = prob.argmax(1)
+#             input = trg[:, t] if random_teacher_forcing[t-1] else top1
+#         return outputs
 
