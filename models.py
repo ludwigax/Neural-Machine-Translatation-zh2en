@@ -199,6 +199,8 @@ class EncDecModule(nn.Module):
                 idx = (top_cum > rand_thr).nonzero()[0].item()
                 pred_ids.append(idx)
             if batch_size == 1:
+                if pred_ids[0] == 3:
+                    break
                 preds.append(pred_ids[0])
             else:
                 preds.append(pred_ids)
