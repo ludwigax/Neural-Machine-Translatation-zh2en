@@ -5,6 +5,7 @@ from models import (
 )
 from data import SequenceDataset, sequence_collate_fn
 
+import tqdm
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -14,11 +15,15 @@ from torch.utils.data import DataLoader, Subset
 import numpy as np
 import wandb
 
+import berttokenizer as btkn
+from nltk.translate.bleu_score import sentence_bleu
+perplexity = lambda x: torch.exp(x)
+
 def train(model: nn.Module, dataloader: DataLoader, optimizer, criterion, clip):
     model.train()
     epoch_loss = 0
 
-    for i, (src_block, trg_block) in enumerate(dataloader):
+    for i, (src_block, trg_block) in tqdm.tqdm(enumerate(dataloader)):
         # the src and trg are already on the device
         optimizer.zero_grad()
         src, src_len = src_block
@@ -27,10 +32,10 @@ def train(model: nn.Module, dataloader: DataLoader, optimizer, criterion, clip):
         output = model(src, src_len, trg, trg_len, teacher_forcing_ratio=0.5)
         norm = torch.norm(output, p=2).detach()
 
-        B = output.shape[1]
+        B = output.shape[0]
         P = output.shape[2]
-        output = output[1:].view(-1, P)
-        trg = trg[1:].view(-1)
+        output = output[:, 1:, :].reshape(-1, P)
+        trg = trg[1:].reshape(-1)
 
         loss = criterion(output, trg)
         loss.backward()
@@ -39,10 +44,34 @@ def train(model: nn.Module, dataloader: DataLoader, optimizer, criterion, clip):
         epoch_loss += loss.item()
 
         # wandb.log({"loss": loss.item(), "norm": norm.item()})
-        print(f"Batch {i} | Loss: {loss.item():.3f} | Norm: {norm:.3f}")
+        print(f"Batch {i} | Loss: {loss.item():.3f} | Perplexity: {perplexity(loss.item()):.3f} | Norm: {norm:.3f}")
     return epoch_loss / len(dataloader)
 
+def test(model: nn.Module, dataloader: DataLoader):
+    model.eval()
+    tkn_en = btkn.load_bert_tokenizer("bert_tokenizer_en.json")
 
+    for i, (src_block, trg_block) in enumerate(dataloader):
+        src, src_len = src_block
+        trg, trg_len = trg_block
+
+        output, preds = model.predict(src, src_len, max_len=len(trg_len))
+        B = output.shape[0]
+        P = output.shape[2]
+        output = output[:, 1:, :].reshape(-1, P)
+        trg = trg[1:].reshape(-1)
+        loss = criterion(output, trg)
+        print(f"Batch {i} | Perplexity: {perplexity(loss.item()):.3f}")
+        
+        if B == 1:
+            sentence = tkn_en.decode(preds)
+        else:
+            sentence = []
+            for j in range(B):
+                sentence.append(
+                    tkn_en.decode(preds[j])
+                )
+        # wandb.log({"test_loss": loss.item()}
 
 
 if __name__=="__main__":
