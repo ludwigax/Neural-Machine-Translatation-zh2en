@@ -85,7 +85,6 @@ def test(model: nn.Module, dataloader: DataLoader):
         # wandb.log({"test_loss": loss.item()}
         # print(sentence)
 
-
 if __name__=="__main__":
     input_dim = 256
     hidden_dim = 256
