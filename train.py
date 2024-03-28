@@ -37,7 +37,7 @@ def train(model: nn.Module, dataloader: DataLoader, optimizer, criterion, clip):
         B = output.shape[0]
         P = output.shape[2]
         output = output[:, 1:, :].reshape(-1, P)
-        trg = trg[1:].reshape(-1)
+        trg = trg[:, 1:].reshape(-1) # a mistake made here "trg[1:].reshape(-1)"
 
         loss = criterion(output, trg)
         loss.backward()
@@ -45,9 +45,9 @@ def train(model: nn.Module, dataloader: DataLoader, optimizer, criterion, clip):
         optimizer.step()
         epoch_loss += loss.item()
 
-        wandb.log({"loss": loss.item(), "norm": norm.item(), "perplexity": perplexity(loss.item())})
+        wandb.log({"loss": loss.item(), "norm": norm.item(), "perplexity": perplexity(loss).item()})
         if i % 20 == 0:
-            print(f"Batch {i} | Loss: {loss.item():.3f} | Perplexity: {perplexity(loss.item()):.3f} | Norm: {norm:.3f}")
+            print(f"Batch {i} | Loss: {loss.item():.3f} | Perplexity: {perplexity(loss).item():.3f} | Norm: {norm:.3f}")
     return epoch_loss / len(dataloader)
 
 def test(model: nn.Module, dataloader: DataLoader):
@@ -62,9 +62,9 @@ def test(model: nn.Module, dataloader: DataLoader):
         B = output.shape[0]
         P = output.shape[2]
         output = output[:, 1:, :].reshape(-1, P)
-        trg = trg[1:].reshape(-1)
+        trg = trg[:, 1:].reshape(-1) # a mistake made here "trg[1:].reshape(-1)"
         loss = criterion(output, trg)
-        print(f"Batch {i} | Perplexity: {perplexity(loss.item()):.3f}")
+        print(f"Batch {i} | Perplexity: {perplexity(loss).item():.3f}")
         
         if B == 1:
             refer_sentence = btkn.decode(tkn_en, trg[: trg_len[0]])

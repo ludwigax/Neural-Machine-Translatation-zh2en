@@ -319,7 +319,10 @@ class SeqAttnLSTM(EncDecModule):
         return pred, attn_pred.squeeze(1), attn
 
     def encode(self, src, src_len, trg=None, **args):
-        trg_len_size = trg.shape[1]
+        if not trg is None:
+            trg_len_size = trg.shape[1]
+        else:
+            trg_len_size = args.get("trg_len_size", 100)
         src = self.in_emb(src)
         padded_src = pad_var_sequences(src, src_len)
         packed_src_out, hidden, cell = self.encoder(padded_src)
